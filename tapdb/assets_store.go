@@ -630,16 +630,12 @@ func (a *AssetStore) dbAssetsToChainAssets(dbAssets []ConfirmedAsset,
 
 		// First, we'll decode the script key which every asset must
 		// specify, and populate the key locator information.
-		rawScriptKeyPub, err := btcec.ParsePubKey(sprout.ScriptKeyRaw)
+		scriptKey, err := parseScriptKey(
+			sprout.InternalKey, sprout.ScriptKey,
+		)
 		if err != nil {
-			return nil, err
-		}
-		rawScriptKeyDesc := keychain.KeyDescriptor{
-			PubKey: rawScriptKeyPub,
-			KeyLocator: keychain.KeyLocator{
-				Index:  uint32(sprout.ScriptKeyIndex),
-				Family: keychain.KeyFamily(sprout.ScriptKeyFam),
-			},
+			return nil, fmt.Errorf("unable to decode script key: "+
+				"%w", err)
 		}
 
 		// Not all assets have a key group, so we only need to
@@ -723,20 +719,6 @@ func (a *AssetStore) dbAssetsToChainAssets(dbAssets []ConfirmedAsset,
 			amount = 1
 		}
 
-		scriptKeyPub, err := btcec.ParsePubKey(sprout.TweakedScriptKey)
-		if err != nil {
-			return nil, err
-		}
-		declaredKnown := extractBool(sprout.ScriptKeyDeclaredKnown)
-		scriptKey := asset.ScriptKey{
-			PubKey: scriptKeyPub,
-			TweakedScriptKey: &asset.TweakedScriptKey{
-				RawKey:        rawScriptKeyDesc,
-				Tweak:         sprout.ScriptKeyTweak,
-				DeclaredKnown: declaredKnown,
-			},
-		}
-
 		assetSprout, err := asset.New(
 			assetGenesis, amount, lockTime, relativeLocktime,
 			scriptKey, groupKey,
@@ -750,7 +732,9 @@ func (a *AssetStore) dbAssetsToChainAssets(dbAssets []ConfirmedAsset,
 		// We cannot use 0 as the amount when creating a new asset with
 		// the New function above. But if this is a tombstone asset, we
 		// actually have to set the amount to 0.
-		if scriptKeyPub.IsEqual(asset.NUMSPubKey) && sprout.Amount == 0 {
+		if scriptKey.PubKey.IsEqual(asset.NUMSPubKey) &&
+			sprout.Amount == 0 {
+
 			assetSprout.Amount = 0
 		}
 
@@ -2649,27 +2633,12 @@ func fetchAssetTransferOutputs(ctx context.Context, q ActiveAssetsStore,
 				"key: %w", err)
 		}
 
-		scriptKey, err := btcec.ParsePubKey(dbOut.ScriptKeyBytes)
+		scriptKey, err := parseScriptKey(
+			dbOut.InternalKey, dbOut.ScriptKey,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("unable to decode script key: "+
 				"%w", err)
-		}
-
-		rawScriptKey, err := btcec.ParsePubKey(
-			dbOut.ScriptKeyRawKeyBytes,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("unable to decode raw script "+
-				"key: %w", err)
-		}
-
-		scriptKeyLocator := keychain.KeyLocator{
-			Family: keychain.KeyFamily(
-				dbOut.ScriptKeyFamily,
-			),
-			Index: uint32(
-				dbOut.ScriptKeyIndex,
-			),
 		}
 
 		var splitRootHash mssmt.NodeHash
@@ -2686,7 +2655,6 @@ func fetchAssetTransferOutputs(ctx context.Context, q ActiveAssetsStore,
 				err)
 		}
 
-		declaredKnown := extractBool(dbOut.ScriptKeyDeclaredKnown)
 		outputAnchor := tapfreighter.Anchor{
 			Value: btcutil.Amount(
 				dbOut.AnchorValue,
@@ -2738,19 +2706,9 @@ func fetchAssetTransferOutputs(ctx context.Context, q ActiveAssetsStore,
 			LockTime:         uint64(dbOut.LockTime.Int32),
 			RelativeLockTime: uint64(dbOut.RelativeLockTime.Int32),
 			AssetVersion:     asset.Version(dbOut.AssetVersion),
-			ScriptKey: asset.ScriptKey{
-				PubKey: scriptKey,
-				TweakedScriptKey: &asset.TweakedScriptKey{
-					RawKey: keychain.KeyDescriptor{
-						PubKey:     rawScriptKey,
-						KeyLocator: scriptKeyLocator,
-					},
-					Tweak:         dbOut.ScriptKeyTweak,
-					DeclaredKnown: declaredKnown,
-				},
-			},
-			ScriptKeyLocal: dbOut.ScriptKeyLocal,
-			WitnessData:    witnessData,
+			ScriptKey:        scriptKey,
+			ScriptKeyLocal:   dbOut.ScriptKeyLocal,
+			WitnessData:      witnessData,
 			SplitCommitmentRoot: mssmt.NewComputedNode(
 				splitRootHash,
 				uint64(dbOut.SplitCommitmentRootValue.Int64),
@@ -3021,13 +2979,14 @@ func (a *AssetStore) LogAnchorTxConfirm(ctx context.Context,
 					"witness: %w", err)
 			}
 
-			scriptPubKey, err := btcec.ParsePubKey(
-				out.ScriptKeyBytes,
+			fullScriptKey, err := parseScriptKey(
+				out.InternalKey, out.ScriptKey,
 			)
 			if err != nil {
 				return fmt.Errorf("unable to decode script "+
 					"key: %w", err)
 			}
+			scriptPubKey := fullScriptKey.PubKey
 
 			isNumsKey := scriptPubKey.IsEqual(asset.NUMSPubKey)
 			isTombstone := isNumsKey &&
@@ -3035,7 +2994,7 @@ func (a *AssetStore) LogAnchorTxConfirm(ctx context.Context,
 				out.OutputType == int16(tappsbt.TypeSplitRoot)
 			isBurn := !isNumsKey && len(witnessData) > 0 &&
 				asset.IsBurnKey(scriptPubKey, witnessData[0])
-			isKnown := extractBool(out.ScriptKeyDeclaredKnown)
+			isKnown := fullScriptKey.DeclaredKnown
 			skipAssetCreation := !isTombstone && !isBurn &&
 				!out.ScriptKeyLocal && !isKnown
 
@@ -3066,7 +3025,7 @@ func (a *AssetStore) LogAnchorTxConfirm(ctx context.Context,
 			// overwrite all other fields.
 			templateID := spentAssetIDs[0]
 			params := ApplyPendingOutput{
-				ScriptKeyID: out.ScriptKeyID,
+				ScriptKeyID: out.ScriptKey.ScriptKeyID,
 				AnchorUtxoID: sqlInt64(
 					out.AnchorUtxoID,
 				),
@@ -3099,13 +3058,11 @@ func (a *AssetStore) LogAnchorTxConfirm(ctx context.Context,
 					"witnesses: %w", err)
 			}
 
-			var scriptKey asset.SerializedKey
-			copy(scriptKey[:], out.ScriptKeyBytes)
+			scriptKey := asset.ToSerialized(scriptPubKey)
 			receiverProof, ok := conf.FinalProofs[scriptKey]
 			if !ok {
 				return fmt.Errorf("no proof found for output "+
-					"with script key %x",
-					out.ScriptKeyBytes)
+					"with script key %x", scriptKey[:])
 			}
 			localProofKeys = append(localProofKeys, scriptKey)
 
