@@ -2,6 +2,7 @@ package tapdb
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/golang-migrate/migrate/v4/database"
 	"github.com/golang-migrate/migrate/v4/source/httpfs"
 	"github.com/lightninglabs/taproot-assets/fn"
+	"github.com/lightninglabs/taproot-assets/tapdb/sqlc"
 )
 
 const (
@@ -24,6 +26,13 @@ const (
 	// NOTE: This MUST be updated when a new migration is added.
 	LatestMigrationVersion = 24
 )
+
+// DatabaseBackend is an interface that contains all methods our different
+// Database backends implement.
+type DatabaseBackend interface {
+	BatchedQuerier
+	WithTx(tx *sql.Tx) *sqlc.Queries
+}
 
 // MigrationTarget is a functional option that can be passed to applyMigrations
 // to specify a target version to migrate to. `currentDbVersion` is the current
@@ -115,9 +124,10 @@ func (m *migrationLogger) Verbose() bool {
 
 // applyMigrations executes database migration files found in the given file
 // system under the given path, using the passed database driver and database
-// name, up to or down to the given target version.
+// name, up to or down to the given target version. The boolean return value
+// indicates whether any migrations were applied.
 func applyMigrations(fs fs.FS, driver database.Driver, path, dbName string,
-	targetVersion MigrationTarget, opts *migrateOptions) error {
+	targetVersion MigrationTarget, opts *migrateOptions) (bool, error) {
 
 	// With the migrate instance open, we'll create a new migration source
 	// using the embedded file system stored in sqlSchemas. The library
@@ -125,7 +135,7 @@ func applyMigrations(fs fs.FS, driver database.Driver, path, dbName string,
 	// in this intermediate layer.
 	migrateFileServer, err := httpfs.New(http.FS(fs), path)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Finally, we'll run the migration with our driver above based on the
@@ -135,7 +145,7 @@ func applyMigrations(fs fs.FS, driver database.Driver, path, dbName string,
 		"migrations", migrateFileServer, dbName, driver,
 	)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	migrationVersion, _, _ := sqlMigrate.Version()
@@ -144,38 +154,44 @@ func applyMigrations(fs fs.FS, driver database.Driver, path, dbName string,
 	// prevent that without explicit accounting.
 	latestVersion := opts.latestVersion.UnwrapOr(LatestMigrationVersion)
 	if migrationVersion > latestVersion {
-		return fmt.Errorf("%w: database version is newer than the "+
-			"latest migration version, preventing downgrade: "+
+		return false, fmt.Errorf("%w: database version is newer than "+
+			"the latest migration version, preventing downgrade: "+
 			"db_version=%v, latest_migration_version=%v",
 			ErrMigrationDowngrade, migrationVersion, latestVersion)
 	}
 
 	// Report the current version of the database before the migration.
-	currentDbVersion, _, err := driver.Version()
+	versionBeforeMigration, _, err := driver.Version()
 	if err != nil {
-		return fmt.Errorf("unable to get current db version: %w", err)
+		return false, fmt.Errorf("unable to get current db version: %w",
+			err)
 	}
 	log.Infof("Attempting to apply migration(s) "+
 		"(current_db_version=%v, latest_migration_version=%v)",
-		currentDbVersion, latestVersion)
+		versionBeforeMigration, latestVersion)
 
 	// Apply our local logger to the migration instance.
 	sqlMigrate.Log = &migrationLogger{log}
 
 	// Execute the migration based on the target given.
-	err = targetVersion(sqlMigrate, currentDbVersion, latestVersion)
+	err = targetVersion(sqlMigrate, versionBeforeMigration, latestVersion)
 	if err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		return err
+		return false, err
 	}
+
+	// If we actually did migrate, we'll now run the Golang based
+	// post-migration checks that ensure the database is in a consistent
+	// state, based on properties not fully expressible in SQL.
 
 	// Report the current version of the database after the migration.
-	currentDbVersion, _, err = driver.Version()
+	versionAfterMigration, _, err := driver.Version()
 	if err != nil {
-		return fmt.Errorf("unable to get current db version: %w", err)
+		return true, fmt.Errorf("unable to get current db version: %w",
+			err)
 	}
-	log.Infof("Database version after migration: %v", currentDbVersion)
+	log.Infof("Database version after migration: %v", versionAfterMigration)
 
-	return nil
+	return true, nil
 }
 
 // replacerFS is an implementation of a fs.FS virtual file system that wraps an
