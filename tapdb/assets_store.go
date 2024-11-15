@@ -212,7 +212,7 @@ type ActiveAssetsStore interface {
 	// disk.
 	FetchAssetProofs(ctx context.Context) ([]AssetProof, error)
 
-	// FetchAssetsProofsSizes fetches all the asset proofs lengths that are
+	// FetchAssetProofsSizes fetches all the asset proofs lengths that are
 	// stored on disk.
 	FetchAssetProofsSizes(ctx context.Context) ([]AssetProofSize, error)
 
@@ -363,12 +363,12 @@ type ActiveAssetsStore interface {
 // MetaStore is a sub-set of the main sqlc.Querier interface that contains
 // methods related to metadata of the daemon.
 type MetaStore interface {
-	// AssetsDBSize returns the total size of the taproot assets sqlite
-	// database.
+	// AssetsDBSizeSqlite returns the total size of the taproot assets
+	// sqlite database.
 	AssetsDBSizeSqlite(ctx context.Context) (int32, error)
 
-	// AssetsDBSize returns the total size of the taproot assets postgres
-	// database.
+	// AssetsDBSizePostgres returns the total size of the taproot assets
+	// postgres database.
 	AssetsDBSizePostgres(ctx context.Context) (int64, error)
 }
 
@@ -1471,8 +1471,8 @@ func locatorToProofQuery(locator proof.Locator) (FetchAssetProof, error) {
 // the FileArchiver.
 //
 // NOTE: This implements the proof.Archiver interface.
-func (a *AssetStore) FetchIssuanceProof(ctx context.Context, id asset.ID,
-	anchorOutpoint wire.OutPoint) (proof.Blob, error) {
+func (a *AssetStore) FetchIssuanceProof(_ context.Context, _ asset.ID,
+	_ wire.OutPoint) (proof.Blob, error) {
 
 	return nil, proof.ErrProofNotFound
 }
