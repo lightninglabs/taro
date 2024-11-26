@@ -1238,7 +1238,9 @@ func (a *AuxSweeper) importCommitScriptKeys(req lnwallet.ResolutionReq) error {
 
 	ctxb := context.Background()
 	for _, key := range keysToImport {
-		err := a.cfg.AddrBook.InsertScriptKey(ctxb, key, true)
+		err := a.cfg.AddrBook.InsertScriptKey(
+			ctxb, key, true, asset.ScriptKeyScriptPathChannel,
+		)
 		if err != nil {
 			return fmt.Errorf("unable to insert script "+
 				"key: %w", err)
@@ -1458,7 +1460,9 @@ func (a *AuxSweeper) importCommitTx(req lnwallet.ResolutionReq,
 	// the asset will be materialized in the asset table and show up in the
 	// balance correctly.
 	ctxb := context.Background()
-	err := a.cfg.AddrBook.InsertScriptKey(ctxb, fundingScriptKey, true)
+	err := a.cfg.AddrBook.InsertScriptKey(
+		ctxb, fundingScriptKey, true, asset.ScriptKeyScriptPathChannel,
+	)
 	if err != nil {
 		return fmt.Errorf("unable to insert script key: %w", err)
 	}

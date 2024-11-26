@@ -158,10 +158,20 @@ func (s *PostgresStore) ExecuteMigrations(target MigrationTarget,
 	}
 
 	postgresFS := newReplacerFS(sqlSchemas, postgresSchemaReplacements)
-	return applyMigrations(
+	didMigrate, err := applyMigrations(
 		postgresFS, driver, "sqlc/migrations", s.cfg.DBName, target,
 		opts,
 	)
+	if err != nil {
+		return fmt.Errorf("error applying migrations: %w", err)
+	}
+
+	// Run post-migration checks if we actually did migrate.
+	if didMigrate {
+		return runPostMigrationChecks(s)
+	}
+
+	return nil
 }
 
 // NewTestPostgresDB is a helper function that creates a Postgres database for

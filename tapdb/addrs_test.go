@@ -663,8 +663,8 @@ func randScriptKey(t *testing.T) asset.ScriptKey {
 // insertScriptKeyWithNull is a helper function that inserts a script key with a
 // a NULL value for declared known. We use this so we can insert a NULL vs an
 // actual value. It is identical to the InsertScriptKey.
-func insertScriptKeyWithNull(ctx context.Context, key asset.ScriptKey,
-) func(AddrBook) error {
+func insertScriptKeyWithNull(ctx context.Context,
+	key asset.ScriptKey) func(AddrBook) error {
 
 	return func(q AddrBook) error {
 		internalKeyID, err := insertInternalKey(

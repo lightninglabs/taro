@@ -936,11 +936,9 @@ WITH genesis_info AS (
     WHERE wit.gen_asset_id IN (SELECT gen_asset_id FROM genesis_info)
 )
 SELECT 
-    version, script_keys.tweak, script_keys.tweaked_script_key,
-    script_keys.declared_known AS script_key_declared_known,
-    internal_keys.raw_key AS script_key_raw,
-    internal_keys.key_family AS script_key_fam,
-    internal_keys.key_index AS script_key_index,
+    version,
+    script_keys.script_key_id, script_keys.internal_key_id, script_keys.tweaked_script_key, script_keys.tweak, script_keys.declared_known, script_keys.key_type,
+    internal_keys.key_id, internal_keys.raw_key, internal_keys.key_family, internal_keys.key_index,
     key_group_info.tapscript_root, 
     key_group_info.witness_stack, 
     key_group_info.tweaked_group_key,
@@ -964,32 +962,28 @@ JOIN internal_keys
 `
 
 type FetchAssetsForBatchRow struct {
-	Version                int32
-	Tweak                  []byte
-	TweakedScriptKey       []byte
-	ScriptKeyDeclaredKnown sql.NullBool
-	ScriptKeyRaw           []byte
-	ScriptKeyFam           int32
-	ScriptKeyIndex         int32
-	TapscriptRoot          []byte
-	WitnessStack           []byte
-	TweakedGroupKey        []byte
-	GroupKeyRaw            []byte
-	GroupKeyFamily         sql.NullInt32
-	GroupKeyIndex          sql.NullInt32
-	ScriptVersion          int32
-	Amount                 int64
-	LockTime               sql.NullInt32
-	RelativeLockTime       sql.NullInt32
-	Spent                  bool
-	AssetID                []byte
-	AssetTag               string
-	MetaHash               []byte
-	MetaType               sql.NullInt16
-	MetaBlob               []byte
-	GenesisOutputIndex     int32
-	AssetType              int16
-	GenesisPrevOut         []byte
+	Version            int32
+	ScriptKey          ScriptKey
+	InternalKey        InternalKey
+	TapscriptRoot      []byte
+	WitnessStack       []byte
+	TweakedGroupKey    []byte
+	GroupKeyRaw        []byte
+	GroupKeyFamily     sql.NullInt32
+	GroupKeyIndex      sql.NullInt32
+	ScriptVersion      int32
+	Amount             int64
+	LockTime           sql.NullInt32
+	RelativeLockTime   sql.NullInt32
+	Spent              bool
+	AssetID            []byte
+	AssetTag           string
+	MetaHash           []byte
+	MetaType           sql.NullInt16
+	MetaBlob           []byte
+	GenesisOutputIndex int32
+	AssetType          int16
+	GenesisPrevOut     []byte
 }
 
 // We use a LEFT JOIN here as not every asset has a group key, so this'll
@@ -1007,12 +1001,16 @@ func (q *Queries) FetchAssetsForBatch(ctx context.Context, rawKey []byte) ([]Fet
 		var i FetchAssetsForBatchRow
 		if err := rows.Scan(
 			&i.Version,
-			&i.Tweak,
-			&i.TweakedScriptKey,
-			&i.ScriptKeyDeclaredKnown,
-			&i.ScriptKeyRaw,
-			&i.ScriptKeyFam,
-			&i.ScriptKeyIndex,
+			&i.ScriptKey.ScriptKeyID,
+			&i.ScriptKey.InternalKeyID,
+			&i.ScriptKey.TweakedScriptKey,
+			&i.ScriptKey.Tweak,
+			&i.ScriptKey.DeclaredKnown,
+			&i.ScriptKey.KeyType,
+			&i.InternalKey.KeyID,
+			&i.InternalKey.RawKey,
+			&i.InternalKey.KeyFamily,
+			&i.InternalKey.KeyIndex,
 			&i.TapscriptRoot,
 			&i.WitnessStack,
 			&i.TweakedGroupKey,
@@ -1578,7 +1576,7 @@ func (q *Queries) FetchMintingBatchesByInverseState(ctx context.Context, batchSt
 }
 
 const fetchScriptKeyByTweakedKey = `-- name: FetchScriptKeyByTweakedKey :one
-SELECT tweak, raw_key, key_family, key_index, declared_known
+SELECT script_keys.script_key_id, script_keys.internal_key_id, script_keys.tweaked_script_key, script_keys.tweak, script_keys.declared_known, script_keys.key_type, internal_keys.key_id, internal_keys.raw_key, internal_keys.key_family, internal_keys.key_index
 FROM script_keys
 JOIN internal_keys
   ON script_keys.internal_key_id = internal_keys.key_id
@@ -1586,22 +1584,24 @@ WHERE script_keys.tweaked_script_key = $1
 `
 
 type FetchScriptKeyByTweakedKeyRow struct {
-	Tweak         []byte
-	RawKey        []byte
-	KeyFamily     int32
-	KeyIndex      int32
-	DeclaredKnown sql.NullBool
+	ScriptKey   ScriptKey
+	InternalKey InternalKey
 }
 
 func (q *Queries) FetchScriptKeyByTweakedKey(ctx context.Context, tweakedScriptKey []byte) (FetchScriptKeyByTweakedKeyRow, error) {
 	row := q.db.QueryRowContext(ctx, fetchScriptKeyByTweakedKey, tweakedScriptKey)
 	var i FetchScriptKeyByTweakedKeyRow
 	err := row.Scan(
-		&i.Tweak,
-		&i.RawKey,
-		&i.KeyFamily,
-		&i.KeyIndex,
-		&i.DeclaredKnown,
+		&i.ScriptKey.ScriptKeyID,
+		&i.ScriptKey.InternalKeyID,
+		&i.ScriptKey.TweakedScriptKey,
+		&i.ScriptKey.Tweak,
+		&i.ScriptKey.DeclaredKnown,
+		&i.ScriptKey.KeyType,
+		&i.InternalKey.KeyID,
+		&i.InternalKey.RawKey,
+		&i.InternalKey.KeyFamily,
+		&i.InternalKey.KeyIndex,
 	)
 	return i, err
 }
@@ -1688,9 +1688,13 @@ SELECT seedling_id, asset_name, asset_type, asset_version, asset_supply,
     assets_meta.meta_data_hash, assets_meta.meta_data_type, 
     assets_meta.meta_data_blob, emission_enabled, batch_id, 
     group_genesis_id, group_anchor_id, group_tapscript_root,
+    -- TODO(guggero): We should use sqlc.embed() for the script key and internal
+    -- key fields, but we can't because it's a LEFT JOIN. We should check if the
+    -- LEFT JOIN is actually necessary or if we always have keys for seedlings.
     script_keys.tweak AS script_key_tweak,
     script_keys.tweaked_script_key,
     script_keys.declared_known AS script_key_declared_known,
+    script_keys.key_type AS script_key_type,
     internal_keys.raw_key AS script_key_raw,
     internal_keys.key_family AS script_key_fam,
     internal_keys.key_index AS script_key_index,
@@ -1726,6 +1730,7 @@ type FetchSeedlingsForBatchRow struct {
 	ScriptKeyTweak         []byte
 	TweakedScriptKey       []byte
 	ScriptKeyDeclaredKnown sql.NullBool
+	ScriptKeyType          sql.NullInt16
 	ScriptKeyRaw           []byte
 	ScriptKeyFam           sql.NullInt32
 	ScriptKeyIndex         sql.NullInt32
@@ -1760,6 +1765,7 @@ func (q *Queries) FetchSeedlingsForBatch(ctx context.Context, rawKey []byte) ([]
 			&i.ScriptKeyTweak,
 			&i.TweakedScriptKey,
 			&i.ScriptKeyDeclaredKnown,
+			&i.ScriptKeyType,
 			&i.ScriptKeyRaw,
 			&i.ScriptKeyFam,
 			&i.ScriptKeyIndex,
@@ -1815,6 +1821,53 @@ func (q *Queries) FetchTapscriptTree(ctx context.Context, rootHash []byte) ([]Fe
 	for rows.Next() {
 		var i FetchTapscriptTreeRow
 		if err := rows.Scan(&i.BranchOnly, &i.RawNode); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const fetchUnknownTypeScriptKeys = `-- name: FetchUnknownTypeScriptKeys :many
+SELECT script_keys.script_key_id, script_keys.internal_key_id, script_keys.tweaked_script_key, script_keys.tweak, script_keys.declared_known, script_keys.key_type, internal_keys.key_id, internal_keys.raw_key, internal_keys.key_family, internal_keys.key_index
+FROM script_keys
+JOIN internal_keys
+  ON script_keys.internal_key_id = internal_keys.key_id
+WHERE script_keys.key_type IS NULL
+`
+
+type FetchUnknownTypeScriptKeysRow struct {
+	ScriptKey   ScriptKey
+	InternalKey InternalKey
+}
+
+func (q *Queries) FetchUnknownTypeScriptKeys(ctx context.Context) ([]FetchUnknownTypeScriptKeysRow, error) {
+	rows, err := q.db.QueryContext(ctx, fetchUnknownTypeScriptKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FetchUnknownTypeScriptKeysRow
+	for rows.Next() {
+		var i FetchUnknownTypeScriptKeysRow
+		if err := rows.Scan(
+			&i.ScriptKey.ScriptKeyID,
+			&i.ScriptKey.InternalKeyID,
+			&i.ScriptKey.TweakedScriptKey,
+			&i.ScriptKey.Tweak,
+			&i.ScriptKey.DeclaredKnown,
+			&i.ScriptKey.KeyType,
+			&i.InternalKey.KeyID,
+			&i.InternalKey.RawKey,
+			&i.InternalKey.KeyFamily,
+			&i.InternalKey.KeyIndex,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -2197,12 +2250,8 @@ func (q *Queries) QueryAssetBalancesByGroup(ctx context.Context, arg QueryAssetB
 const queryAssets = `-- name: QueryAssets :many
 SELECT
     assets.asset_id AS asset_primary_key, assets.genesis_id, version, spent,
-    script_keys.tweak AS script_key_tweak,
-    script_keys.tweaked_script_key,
-    script_keys.declared_known AS script_key_declared_known,
-    internal_keys.raw_key AS script_key_raw,
-    internal_keys.key_family AS script_key_fam,
-    internal_keys.key_index AS script_key_index,
+    script_keys.script_key_id, script_keys.internal_key_id, script_keys.tweaked_script_key, script_keys.tweak, script_keys.declared_known, script_keys.key_type,
+    internal_keys.key_id, internal_keys.raw_key, internal_keys.key_family, internal_keys.key_index,
     key_group_info_view.tapscript_root, 
     key_group_info_view.witness_stack, 
     key_group_info_view.tweaked_group_key,
@@ -2297,12 +2346,8 @@ type QueryAssetsRow struct {
 	GenesisID                int64
 	Version                  int32
 	Spent                    bool
-	ScriptKeyTweak           []byte
-	TweakedScriptKey         []byte
-	ScriptKeyDeclaredKnown   sql.NullBool
-	ScriptKeyRaw             []byte
-	ScriptKeyFam             int32
-	ScriptKeyIndex           int32
+	ScriptKey                ScriptKey
+	InternalKey              InternalKey
 	TapscriptRoot            []byte
 	WitnessStack             []byte
 	TweakedGroupKey          []byte
@@ -2371,12 +2416,16 @@ func (q *Queries) QueryAssets(ctx context.Context, arg QueryAssetsParams) ([]Que
 			&i.GenesisID,
 			&i.Version,
 			&i.Spent,
-			&i.ScriptKeyTweak,
-			&i.TweakedScriptKey,
-			&i.ScriptKeyDeclaredKnown,
-			&i.ScriptKeyRaw,
-			&i.ScriptKeyFam,
-			&i.ScriptKeyIndex,
+			&i.ScriptKey.ScriptKeyID,
+			&i.ScriptKey.InternalKeyID,
+			&i.ScriptKey.TweakedScriptKey,
+			&i.ScriptKey.Tweak,
+			&i.ScriptKey.DeclaredKnown,
+			&i.ScriptKey.KeyType,
+			&i.InternalKey.KeyID,
+			&i.InternalKey.RawKey,
+			&i.InternalKey.KeyFamily,
+			&i.InternalKey.KeyIndex,
 			&i.TapscriptRoot,
 			&i.WitnessStack,
 			&i.TweakedGroupKey,
@@ -2874,21 +2923,29 @@ func (q *Queries) UpsertManagedUTXO(ctx context.Context, arg UpsertManagedUTXOPa
 
 const upsertScriptKey = `-- name: UpsertScriptKey :one
 INSERT INTO script_keys (
-    internal_key_id, tweaked_script_key, tweak, declared_known
+    internal_key_id, tweaked_script_key, tweak, declared_known, key_type
 ) VALUES (
-    $1, $2, $3, $4
+    $1, $2, $3, $4, $5
 )  ON CONFLICT (tweaked_script_key)
-    -- As a NOP, we just set the script key to the one that triggered the
-    -- conflict.
+    -- This is not a NOP, we overwrite the declared_known and key_type value.
     DO UPDATE SET 
       tweaked_script_key = EXCLUDED.tweaked_script_key,
       -- If the script key was previously unknown, we'll update to the new
-      -- value.
-      declared_known = CASE
-                         WHEN script_keys.declared_known IS NULL OR script_keys.declared_known = FALSE
-                         THEN COALESCE(EXCLUDED.declared_known, script_keys.declared_known)
-                         ELSE script_keys.declared_known
-                       END
+      -- value, if that is non-NULL.
+      declared_known =
+          CASE
+             WHEN COALESCE(script_keys.declared_known, FALSE) = FALSE
+             THEN COALESCE(EXCLUDED.declared_known, script_keys.declared_known)
+             ELSE script_keys.declared_known
+           END,
+      -- We only overwrite the key type with a value that does not mean
+      -- "unknown" (0 or NULL).
+      key_type =
+          CASE
+              WHEN COALESCE(EXCLUDED.key_type, 0) != 0
+              THEN EXCLUDED.key_type
+              ELSE script_keys.key_type
+          END
 RETURNING script_key_id
 `
 
@@ -2897,6 +2954,7 @@ type UpsertScriptKeyParams struct {
 	TweakedScriptKey []byte
 	Tweak            []byte
 	DeclaredKnown    sql.NullBool
+	KeyType          sql.NullInt16
 }
 
 func (q *Queries) UpsertScriptKey(ctx context.Context, arg UpsertScriptKeyParams) (int64, error) {
@@ -2905,6 +2963,7 @@ func (q *Queries) UpsertScriptKey(ctx context.Context, arg UpsertScriptKeyParams
 		arg.TweakedScriptKey,
 		arg.Tweak,
 		arg.DeclaredKnown,
+		arg.KeyType,
 	)
 	var script_key_id int64
 	err := row.Scan(&script_key_id)

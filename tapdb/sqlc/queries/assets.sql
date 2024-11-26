@@ -135,9 +135,13 @@ SELECT seedling_id, asset_name, asset_type, asset_version, asset_supply,
     assets_meta.meta_data_hash, assets_meta.meta_data_type, 
     assets_meta.meta_data_blob, emission_enabled, batch_id, 
     group_genesis_id, group_anchor_id, group_tapscript_root,
+    -- TODO(guggero): We should use sqlc.embed() for the script key and internal
+    -- key fields, but we can't because it's a LEFT JOIN. We should check if the
+    -- LEFT JOIN is actually necessary or if we always have keys for seedlings.
     script_keys.tweak AS script_key_tweak,
     script_keys.tweaked_script_key,
     script_keys.declared_known AS script_key_declared_known,
+    script_keys.key_type AS script_key_type,
     internal_keys.raw_key AS script_key_raw,
     internal_keys.key_family AS script_key_fam,
     internal_keys.key_index AS script_key_index,
@@ -254,11 +258,9 @@ WITH genesis_info AS (
     WHERE wit.gen_asset_id IN (SELECT gen_asset_id FROM genesis_info)
 )
 SELECT 
-    version, script_keys.tweak, script_keys.tweaked_script_key,
-    script_keys.declared_known AS script_key_declared_known,
-    internal_keys.raw_key AS script_key_raw,
-    internal_keys.key_family AS script_key_fam,
-    internal_keys.key_index AS script_key_index,
+    version,
+    sqlc.embed(script_keys),
+    sqlc.embed(internal_keys),
     key_group_info.tapscript_root, 
     key_group_info.witness_stack, 
     key_group_info.tweaked_group_key,
@@ -417,12 +419,8 @@ WHERE (
 -- name: QueryAssets :many
 SELECT
     assets.asset_id AS asset_primary_key, assets.genesis_id, version, spent,
-    script_keys.tweak AS script_key_tweak,
-    script_keys.tweaked_script_key,
-    script_keys.declared_known AS script_key_declared_known,
-    internal_keys.raw_key AS script_key_raw,
-    internal_keys.key_family AS script_key_fam,
-    internal_keys.key_index AS script_key_index,
+    sqlc.embed(script_keys),
+    sqlc.embed(internal_keys),
     key_group_info_view.tapscript_root, 
     key_group_info_view.witness_stack, 
     key_group_info_view.tweaked_group_key,
@@ -848,21 +846,29 @@ WHERE txid = $1;
 
 -- name: UpsertScriptKey :one
 INSERT INTO script_keys (
-    internal_key_id, tweaked_script_key, tweak, declared_known
+    internal_key_id, tweaked_script_key, tweak, declared_known, key_type
 ) VALUES (
-    $1, $2, $3, $4
+    $1, $2, $3, $4, $5
 )  ON CONFLICT (tweaked_script_key)
-    -- As a NOP, we just set the script key to the one that triggered the
-    -- conflict.
+    -- This is not a NOP, we overwrite the declared_known and key_type value.
     DO UPDATE SET 
       tweaked_script_key = EXCLUDED.tweaked_script_key,
       -- If the script key was previously unknown, we'll update to the new
-      -- value.
-      declared_known = CASE
-                         WHEN script_keys.declared_known IS NULL OR script_keys.declared_known = FALSE
-                         THEN COALESCE(EXCLUDED.declared_known, script_keys.declared_known)
-                         ELSE script_keys.declared_known
-                       END
+      -- value, if that is non-NULL.
+      declared_known =
+          CASE
+             WHEN COALESCE(script_keys.declared_known, FALSE) = FALSE
+             THEN COALESCE(EXCLUDED.declared_known, script_keys.declared_known)
+             ELSE script_keys.declared_known
+           END,
+      -- We only overwrite the key type with a value that does not mean
+      -- "unknown" (0 or NULL).
+      key_type =
+          CASE
+              WHEN COALESCE(EXCLUDED.key_type, 0) != 0
+              THEN EXCLUDED.key_type
+              ELSE script_keys.key_type
+          END
 RETURNING script_key_id;
 
 -- name: FetchScriptKeyIDByTweakedKey :one
@@ -871,11 +877,18 @@ FROM script_keys
 WHERE tweaked_script_key = $1;
 
 -- name: FetchScriptKeyByTweakedKey :one
-SELECT tweak, raw_key, key_family, key_index, declared_known
+SELECT sqlc.embed(script_keys), sqlc.embed(internal_keys)
 FROM script_keys
 JOIN internal_keys
   ON script_keys.internal_key_id = internal_keys.key_id
 WHERE script_keys.tweaked_script_key = $1;
+
+-- name: FetchUnknownTypeScriptKeys :many
+SELECT sqlc.embed(script_keys), sqlc.embed(internal_keys)
+FROM script_keys
+JOIN internal_keys
+  ON script_keys.internal_key_id = internal_keys.key_id
+WHERE script_keys.key_type IS NULL;
 
 -- name: FetchInternalKeyLocator :one
 SELECT key_family, key_index

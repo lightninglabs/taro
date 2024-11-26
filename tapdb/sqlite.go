@@ -244,9 +244,19 @@ func (s *SqliteStore) ExecuteMigrations(target MigrationTarget,
 	}
 
 	sqliteFS := newReplacerFS(sqlSchemas, sqliteSchemaReplacements)
-	return applyMigrations(
+	didMigrate, err := applyMigrations(
 		sqliteFS, driver, "sqlc/migrations", "sqlite", target, opts,
 	)
+	if err != nil {
+		return fmt.Errorf("error applying migrations: %w", err)
+	}
+
+	// Run post-migration checks if we actually did migrate.
+	if didMigrate {
+		return runPostMigrationChecks(s)
+	}
+
+	return nil
 }
 
 // NewTestSqliteDB is a helper function that creates an SQLite database for
