@@ -739,6 +739,9 @@ func (c *ChainPlanter) fundGenesisPsbt(ctx context.Context,
 	log.Infof("Funded GenesisPacket for batch: %x", batchKey)
 	log.Tracef("GenesisPacket: %v", spew.Sdump(fundedGenesisPkt))
 
+	// TODO(ffranr): Lock change output here if EnableUniCommitment set for
+	//  batch.
+
 	return fundedGenesisPkt, nil
 }
 
