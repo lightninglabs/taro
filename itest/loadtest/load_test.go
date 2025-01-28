@@ -40,8 +40,16 @@ var loadTestCases = []testCase{
 		fn:   mintTest,
 	},
 	{
+		name: "mintV2",
+		fn:   mintTestV2,
+	},
+	{
 		name: "send",
 		fn:   sendTest,
+	},
+	{
+		name: "sendV2",
+		fn:   sendTestV2,
 	},
 	{
 		name: "multisig",
